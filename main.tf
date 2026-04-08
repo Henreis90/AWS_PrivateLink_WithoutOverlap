@@ -1,112 +1,146 @@
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = {
+      Project   = var.project_name
+      ManagedBy = "Terraform"
+      Purpose   = "PrivateLink-Overlap-PoC"
+    }
+  }
+}
+
+locals {
+  workload_subnet_a = cidrsubnet(var.workload_vpc_cidr, 8, 1)
+  workload_subnet_b = cidrsubnet(var.workload_vpc_cidr, 8, 2)
+  partner_subnet_a  = cidrsubnet(var.partner_vpc_cidr, 8, 1)
+  partner_subnet_b  = cidrsubnet(var.partner_vpc_cidr, 8, 2)
+
+  endpoints = toset([
+    "ssm",
+    "ssmmessages",
+    "ec2messages",
+  ])
+}
+
 data "aws_availability_zones" "available" {
   state = "available"
 }
 
-locals {
-  azs = slice(data.aws_availability_zones.available.names, 0, 2)
-
-  workload_public_subnets = {
-    az1 = {
-      cidr = "10.10.1.0/24"
-      az   = local.azs[0]
-    }
-    az2 = {
-      cidr = "10.10.2.0/24"
-      az   = local.azs[1]
-    }
-  }
-
-  partner_public_subnets = {
-    az1 = {
-      cidr = "10.10.11.0/24"
-      az   = local.azs[0]
-    }
-    az2 = {
-      cidr = "10.10.12.0/24"
-      az   = local.azs[1]
-    }
-  }
-}
-
-# -----------------------------
-# AMI lookup
-# -----------------------------
 data "aws_ssm_parameter" "al2023_ami" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
-# -----------------------------
-# Workload VPC
-# -----------------------------
 resource "aws_vpc" "workload" {
   cidr_block           = var.workload_vpc_cidr
-  enable_dns_support   = true
   enable_dns_hostnames = true
+  enable_dns_support   = true
 
   tags = {
     Name = "${var.project_name}-workload-vpc"
   }
 }
 
-resource "aws_internet_gateway" "workload" {
-  vpc_id = aws_vpc.workload.id
+resource "aws_vpc" "partner" {
+  cidr_block           = var.partner_vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
 
   tags = {
-    Name = "${var.project_name}-workload-igw"
+    Name = "${var.project_name}-partner-vpc"
   }
 }
 
-resource "aws_subnet" "workload" {
-  for_each = local.workload_public_subnets
-
+resource "aws_subnet" "workload_a" {
   vpc_id                  = aws_vpc.workload.id
-  cidr_block              = each.value.cidr
-  availability_zone       = each.value.az
-  map_public_ip_on_launch = true
+  cidr_block              = local.workload_subnet_a
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = false
 
   tags = {
-    Name = "${var.project_name}-workload-${each.key}"
+    Name = "${var.project_name}-workload-a"
   }
 }
 
-resource "aws_route_table" "workload_public" {
+resource "aws_subnet" "workload_b" {
+  vpc_id                  = aws_vpc.workload.id
+  cidr_block              = local.workload_subnet_b
+  availability_zone       = data.aws_availability_zones.available.names[1]
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "${var.project_name}-workload-b"
+  }
+}
+
+resource "aws_subnet" "partner_a" {
+  vpc_id                  = aws_vpc.partner.id
+  cidr_block              = local.partner_subnet_a
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "${var.project_name}-partner-a"
+  }
+}
+
+resource "aws_subnet" "partner_b" {
+  vpc_id                  = aws_vpc.partner.id
+  cidr_block              = local.partner_subnet_b
+  availability_zone       = data.aws_availability_zones.available.names[1]
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "${var.project_name}-partner-b"
+  }
+}
+
+resource "aws_route_table" "workload" {
   vpc_id = aws_vpc.workload.id
 
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.workload.id
+  tags = {
+    Name = "${var.project_name}-workload-rt"
   }
+}
+
+resource "aws_route_table" "partner" {
+  vpc_id = aws_vpc.partner.id
 
   tags = {
-    Name = "${var.project_name}-workload-public-rt"
+    Name = "${var.project_name}-partner-rt"
   }
 }
 
-resource "aws_route_table_association" "workload_public" {
-  for_each = aws_subnet.workload
-
-  subnet_id      = each.value.id
-  route_table_id = aws_route_table.workload_public.id
+resource "aws_route_table_association" "workload_a" {
+  subnet_id      = aws_subnet.workload_a.id
+  route_table_id = aws_route_table.workload.id
 }
 
-resource "aws_security_group" "workload_instance" {
-  name        = "${var.project_name}-workload-sg"
-  description = "Allow HTTP from NLB subnets and admin access if needed"
+resource "aws_route_table_association" "workload_b" {
+  subnet_id      = aws_subnet.workload_b.id
+  route_table_id = aws_route_table.workload.id
+}
+
+resource "aws_route_table_association" "partner_a" {
+  subnet_id      = aws_subnet.partner_a.id
+  route_table_id = aws_route_table.partner.id
+}
+
+resource "aws_route_table_association" "partner_b" {
+  subnet_id      = aws_subnet.partner_b.id
+  route_table_id = aws_route_table.partner.id
+}
+
+resource "aws_security_group" "endpoint_workload" {
+  name        = "${var.project_name}-endpoint-workload-sg"
+  description = "Allows VPC interface endpoints in workload VPC to receive HTTPS from local workloads"
   vpc_id      = aws_vpc.workload.id
 
   ingress {
-    description = "HTTP from workload VPC"
-    from_port   = 80
-    to_port     = 80
+    description = "HTTPS from workload VPC"
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = [var.workload_vpc_cidr]
-  }
-
-  ingress {
-    description = "ICMP for optional troubleshooting"
-    from_port   = -1
-    to_port     = -1
-    protocol    = "icmp"
     cidr_blocks = [var.workload_vpc_cidr]
   }
 
@@ -118,175 +152,117 @@ resource "aws_security_group" "workload_instance" {
   }
 
   tags = {
-    Name = "${var.project_name}-workload-sg"
+    Name = "${var.project_name}-endpoint-workload-sg"
   }
 }
 
-resource "aws_instance" "workload" {
-  ami                         = data.aws_ssm_parameter.al2023_ami.value
-  instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.workload["az1"].id
-  vpc_security_group_ids      = [aws_security_group.workload_instance.id]
-  associate_public_ip_address = true
+resource "aws_security_group" "endpoint_partner" {
+  name        = "${var.project_name}-endpoint-partner-sg"
+  description = "Allows VPC interface endpoints in partner VPC to receive HTTPS from local workloads"
+  vpc_id      = aws_vpc.partner.id
 
-  user_data = <<-EOFUSERDATA
-              #!/bin/bash
-              dnf update -y
-              dnf install -y python3
-              mkdir -p /opt/app
-              cat > /opt/app/index.html <<'EOT'
-              <html>
-              <head><title>PrivateLink PoC</title></head>
-              <body>
-              <h1>PrivateLink PoC funcionando</h1>
-              <p>Serviço privado atrás de NLB interno.</p>
-              <p>Hostname: $(hostname)</p>
-              </body>
-              </html>
-              EOT
-              cd /opt/app
-              nohup python3 -m http.server 80 >/var/log/http.server.log 2>&1 &
-              EOFUSERDATA
+  ingress {
+    description = "HTTPS from partner VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.partner_vpc_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   tags = {
-    Name = "${var.project_name}-workload-instance"
+    Name = "${var.project_name}-endpoint-partner-sg"
   }
 }
 
-resource "aws_lb" "workload_internal_nlb" {
-  name               = substr(replace("${var.project_name}-nlb", "/[^a-zA-Z0-9-]/", ""), 0, 32)
-  internal           = true
-  load_balancer_type = "network"
-  subnets            = [for s in aws_subnet.workload : s.id]
-
-  enable_cross_zone_load_balancing = true
+resource "aws_vpc_endpoint" "workload_ssm" {
+  for_each            = local.endpoints
+  vpc_id              = aws_vpc.workload.id
+  service_name        = "com.amazonaws.${var.region}.${each.value}"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = [aws_subnet.workload_a.id, aws_subnet.workload_b.id]
+  security_group_ids  = [aws_security_group.endpoint_workload.id]
 
   tags = {
-    Name = "${var.project_name}-internal-nlb"
+    Name = "${var.project_name}-workload-${each.value}"
   }
 }
 
-resource "aws_lb_target_group" "workload_http" {
-  name        = substr(replace("${var.project_name}-tg", "/[^a-zA-Z0-9-]/", ""), 0, 32)
-  port        = 80
-  protocol    = "TCP"
-  target_type = "instance"
+resource "aws_vpc_endpoint" "partner_ssm" {
+  for_each            = local.endpoints
+  vpc_id              = aws_vpc.partner.id
+  service_name        = "com.amazonaws.${var.region}.${each.value}"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = [aws_subnet.partner_a.id, aws_subnet.partner_b.id]
+  security_group_ids  = [aws_security_group.endpoint_partner.id]
+
+  tags = {
+    Name = "${var.project_name}-partner-${each.value}"
+  }
+}
+
+resource "aws_iam_role" "ec2_ssm" {
+  name = "${var.project_name}-ec2-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+  role       = aws_iam_role.ec2_ssm.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2_ssm" {
+  name = "${var.project_name}-ec2-ssm-profile"
+  role = aws_iam_role.ec2_ssm.name
+}
+
+resource "aws_security_group" "workload_instance" {
+  name        = "${var.project_name}-workload-instance-sg"
+  description = "Allows HTTP only from internal NLB and local diagnostics"
   vpc_id      = aws_vpc.workload.id
 
-  health_check {
-    enabled             = true
-    interval            = 30
-    port                = "80"
-    protocol            = "TCP"
-    healthy_threshold   = 3
-    unhealthy_threshold = 3
+  ingress {
+    description = "HTTP from inside workload VPC"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.workload_vpc_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   tags = {
-    Name = "${var.project_name}-tg-http"
+    Name = "${var.project_name}-workload-instance-sg"
   }
-}
-
-resource "aws_lb_target_group_attachment" "workload_http" {
-  target_group_arn = aws_lb_target_group.workload_http.arn
-  target_id        = aws_instance.workload.id
-  port             = 80
-}
-
-resource "aws_lb_listener" "workload_http" {
-  load_balancer_arn = aws_lb.workload_internal_nlb.arn
-  port              = 80
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.workload_http.arn
-  }
-}
-
-resource "aws_vpc_endpoint_service" "workload" {
-  acceptance_required        = false
-  network_load_balancer_arns = [aws_lb.workload_internal_nlb.arn]
-
-  tags = {
-    Name = "${var.project_name}-endpoint-service"
-  }
-}
-
-# -----------------------------
-# Partner VPC
-# -----------------------------
-resource "aws_vpc" "partner" {
-  cidr_block           = var.partner_vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = {
-    Name = "${var.project_name}-partner-vpc"
-  }
-}
-
-resource "aws_internet_gateway" "partner" {
-  vpc_id = aws_vpc.partner.id
-
-  tags = {
-    Name = "${var.project_name}-partner-igw"
-  }
-}
-
-resource "aws_subnet" "partner" {
-  for_each = local.partner_public_subnets
-
-  vpc_id                  = aws_vpc.partner.id
-  cidr_block              = each.value.cidr
-  availability_zone       = each.value.az
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "${var.project_name}-partner-${each.key}"
-  }
-}
-
-resource "aws_route_table" "partner_public" {
-  vpc_id = aws_vpc.partner.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.partner.id
-  }
-
-  tags = {
-    Name = "${var.project_name}-partner-public-rt"
-  }
-}
-
-resource "aws_route_table_association" "partner_public" {
-  for_each = aws_subnet.partner
-
-  subnet_id      = each.value.id
-  route_table_id = aws_route_table.partner_public.id
 }
 
 resource "aws_security_group" "partner_instance" {
   name        = "${var.project_name}-partner-instance-sg"
-  description = "Security group for partner test instance"
+  description = "Allows egress from partner test host"
   vpc_id      = aws_vpc.partner.id
-
-  ingress {
-    description = "Optional SSH from your IP if you add a key pair manually"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "ICMP for troubleshooting"
-    from_port   = -1
-    to_port     = -1
-    protocol    = "icmp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   egress {
     from_port   = 0
@@ -300,17 +276,158 @@ resource "aws_security_group" "partner_instance" {
   }
 }
 
-resource "aws_security_group" "partner_vpce" {
-  name        = "${var.project_name}-partner-vpce-sg"
-  description = "Allow partner instance to access the interface endpoint"
+resource "aws_instance" "workload" {
+  ami                    = data.aws_ssm_parameter.al2023_ami.value
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.workload_a.id
+  vpc_security_group_ids = [aws_security_group.workload_instance.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_ssm.name
+  associate_public_ip_address = false
+
+  user_data = <<-EOF
+              #!/bin/bash
+              set -euxo pipefail
+              cat > /usr/local/bin/privatelink-poc-server.py <<'PYEOF'
+              import http.server
+              import socketserver
+              import json
+              import os
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      payload = {
+                          "message": "PrivateLink PoC OK",
+                          "hostname": os.uname().nodename,
+                          "path": self.path,
+                          "source": self.client_address[0]
+                      }
+                      body = json.dumps(payload).encode()
+                      self.send_response(200)
+                      self.send_header("Content-Type", "application/json")
+                      self.send_header("Content-Length", str(len(body)))
+                      self.end_headers()
+                      self.wfile.write(body)
+              with socketserver.TCPServer(("0.0.0.0", 80), Handler) as httpd:
+                  httpd.serve_forever()
+              PYEOF
+              cat > /etc/systemd/system/privatelink-poc.service <<'SERVICE'
+              [Unit]
+              Description=PrivateLink PoC HTTP service
+              After=network.target
+
+              [Service]
+              ExecStart=/usr/bin/python3 /usr/local/bin/privatelink-poc-server.py
+              Restart=always
+              RestartSec=3
+
+              [Install]
+              WantedBy=multi-user.target
+              SERVICE
+              systemctl daemon-reload
+              systemctl enable privatelink-poc.service
+              systemctl start privatelink-poc.service
+              EOF
+
+  tags = {
+    Name = "${var.project_name}-workload"
+  }
+}
+
+resource "aws_instance" "partner" {
+  ami                    = data.aws_ssm_parameter.al2023_ami.value
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.partner_a.id
+  vpc_security_group_ids = [aws_security_group.partner_instance.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_ssm.name
+  associate_public_ip_address = false
+
+  user_data = <<-EOF
+              #!/bin/bash
+              set -euxo pipefail
+              cat > /etc/motd <<'MOTD'
+              PrivateLink partner test instance.
+              Use Session Manager and test the service with curl against the VPC endpoint DNS name.
+              MOTD
+              EOF
+
+  tags = {
+    Name = "${var.project_name}-partner"
+  }
+}
+
+resource "aws_lb" "internal_nlb" {
+  name               = substr(replace("${var.project_name}-nlb", "/[^a-zA-Z0-9-]/", ""), 0, 32)
+  internal           = true
+  load_balancer_type = "network"
+  subnets            = [aws_subnet.workload_a.id, aws_subnet.workload_b.id]
+
+  enable_deletion_protection = false
+
+  tags = {
+    Name = "${var.project_name}-internal-nlb"
+  }
+}
+
+resource "aws_lb_target_group" "workload" {
+  name        = substr(replace("${var.project_name}-tg", "/[^a-zA-Z0-9-]/", ""), 0, 32)
+  port        = 80
+  protocol    = "TCP"
+  target_type = "instance"
+  vpc_id      = aws_vpc.workload.id
+
+  health_check {
+    enabled             = true
+    protocol            = "HTTP"
+    path                = "/"
+    port                = "80"
+    interval            = 30
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 6
+    matcher             = "200"
+  }
+
+  tags = {
+    Name = "${var.project_name}-tg"
+  }
+}
+
+resource "aws_lb_target_group_attachment" "workload" {
+  target_group_arn = aws_lb_target_group.workload.arn
+  target_id        = aws_instance.workload.id
+  port             = 80
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.internal_nlb.arn
+  port              = 80
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.workload.arn
+  }
+}
+
+resource "aws_vpc_endpoint_service" "workload" {
+  acceptance_required        = false
+  network_load_balancer_arns = [aws_lb.internal_nlb.arn]
+
+  tags = {
+    Name = "${var.project_name}-endpoint-service"
+  }
+}
+
+resource "aws_security_group" "privatelink_consumer" {
+  name        = "${var.project_name}-privatelink-consumer-sg"
+  description = "Allows partner host to connect to the Interface Endpoint over HTTP"
   vpc_id      = aws_vpc.partner.id
 
   ingress {
-    description     = "HTTP from partner instance SG"
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    security_groups = [aws_security_group.partner_instance.id]
+    description = "HTTP from partner VPC"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.partner_vpc_cidr]
   }
 
   egress {
@@ -321,38 +438,19 @@ resource "aws_security_group" "partner_vpce" {
   }
 
   tags = {
-    Name = "${var.project_name}-partner-vpce-sg"
+    Name = "${var.project_name}-privatelink-consumer-sg"
   }
 }
 
-resource "aws_instance" "partner" {
-  ami                         = data.aws_ssm_parameter.al2023_ami.value
-  instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.partner["az1"].id
-  vpc_security_group_ids      = [aws_security_group.partner_instance.id]
-  associate_public_ip_address = true
-
-  user_data = <<-EOFUSERDATA
-              #!/bin/bash
-              dnf update -y
-              dnf install -y curl
-              echo "Partner instance ready" > /etc/motd
-              EOFUSERDATA
-
-  tags = {
-    Name = "${var.project_name}-partner-instance"
-  }
-}
-
-resource "aws_vpc_endpoint" "partner_to_workload" {
-  vpc_id             = aws_vpc.partner.id
-  service_name       = aws_vpc_endpoint_service.workload.service_name
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = [for s in aws_subnet.partner : s.id]
-  security_group_ids = [aws_security_group.partner_vpce.id]
+resource "aws_vpc_endpoint" "partner_to_service" {
+  vpc_id              = aws_vpc.partner.id
+  service_name        = aws_vpc_endpoint_service.workload.service_name
+  vpc_endpoint_type   = "Interface"
   private_dns_enabled = false
+  subnet_ids          = [aws_subnet.partner_a.id, aws_subnet.partner_b.id]
+  security_group_ids  = [aws_security_group.privatelink_consumer.id]
 
   tags = {
-    Name = "${var.project_name}-partner-to-workload-vpce"
+    Name = "${var.project_name}-partner-to-service"
   }
 }

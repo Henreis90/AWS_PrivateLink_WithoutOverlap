@@ -1,35 +1,32 @@
-# Terraform PoC - PrivateLink with Overlapping CIDRs
+# PrivateLink overlap PoC with Session Manager only
 
-This lab demonstrates a simple proof of concept for exposing a private workload **without a public NLB**, even when the **partner VPC uses the same CIDR** as the workload VPC.
+This Terraform lab creates a low-complexity PoC to prove that a service can be consumed privately even when the **provider VPC** and the **partner VPC** intentionally use the **same CIDR range**.
 
-## What this lab creates
+## What this lab builds
 
-- `vpc-workload` with CIDR `10.10.0.0/16`
-- `vpc-partner` with CIDR `10.10.0.0/16` (intentionally overlapping)
-- One EC2 instance in the workload VPC running a simple HTTP server
-- One **internal** Network Load Balancer in front of the workload instance
-- One VPC Endpoint Service (PrivateLink provider side)
-- One Interface VPC Endpoint in the partner VPC (PrivateLink consumer side)
-- One EC2 instance in the partner VPC for testing with `curl`
+- 1 workload VPC with CIDR `10.10.0.0/16`
+- 1 partner VPC with CIDR `10.10.0.0/16` (overlapping on purpose)
+- 1 Amazon Linux 2023 EC2 in the workload VPC, without public IP
+- 1 internal Network Load Balancer in front of the workload EC2
+- 1 PrivateLink Endpoint Service backed by the internal NLB
+- 1 Amazon Linux 2023 EC2 in the partner VPC, without public IP
+- 1 Interface VPC Endpoint in the partner VPC to consume the service privately
+- 3 SSM interface endpoints in **each VPC**: `ssm`, `ssmmessages`, `ec2messages`
+- IAM role/profile so both EC2 instances are managed only through Session Manager
 
-## What this proves
+## Security categories
 
-1. You can keep the service private.
-2. You do not need a public IP on the NLB.
-3. Overlapping CIDRs do not prevent service consumption through PrivateLink.
-4. This is a cleaner option than using a public NLB just to avoid IP conflict with partners.
+- **A: Segurança Básica**
+  - No public IPs on EC2 instances
+  - Session Manager instead of SSH
+  - Internal NLB instead of public NLB
 
-## Important note
+- **B: Segurança Recomendada**
+  - PrivateLink to publish the service privately to a partner
+  - Interface VPC Endpoints for SSM instead of NAT Gateway
 
-This lab does **not** try to route traffic directly between the two VPCs. That is intentional.
-The point is to show that **PrivateLink exposes the service privately without relying on broad routed connectivity**.
-
-## Prerequisites
-
-- Terraform >= 1.5
-- AWS credentials configured
-- One AWS region enabled in your account
-- Permission to create VPC, EC2, NLB, VPC Endpoints, IAM roles, and SSM parameter reads
+- **C: Segurança Opcional**
+  - In a next version, add TGW and an inspection VPC/firewall
 
 ## Usage
 
@@ -39,31 +36,36 @@ terraform plan
 terraform apply
 ```
 
-After apply, connect to the partner instance using SSM Session Manager if supported in your environment, or temporarily add a management method of your choice.
-Then test:
+When the apply finishes, use the outputs to open Session Manager sessions.
+
+Example:
 
 ```bash
-curl http://<private_dns_name_from_output>
+aws ssm start-session --target i-xxxxxxxxxxxxxxxxx --region us-east-1
 ```
 
-The output should come from the workload instance through the internal NLB and PrivateLink.
+From the **partner** instance, test the private service using the DNS name from `partner_vpce_dns_names`:
+
+```bash
+curl http://<dns-name-from-output>
+```
+
+Expected result: a JSON response similar to:
+
+```json
+{"message": "PrivateLink PoC OK", "hostname": "...", "path": "/", "source": "..."}
+```
+
+## Notes
+
+- This lab intentionally avoids NAT Gateway to keep the traffic private and the design simpler.
+- It also avoids TGW/VPN in version 1 so the PoC remains focused on the main point: **private access without public IPs, even with overlapping CIDRs**.
+- Make sure your local workstation already has:
+  - AWS CLI configured
+  - Session Manager Plugin installed
 
 ## Destroy
 
 ```bash
 terraform destroy
 ```
-
-## Suggested demo script
-
-1. Show both VPC CIDRs are identical.
-2. Show the NLB is **internal**, not internet-facing.
-3. Show the Endpoint Service and Interface Endpoint were created.
-4. From the partner instance, `curl` the endpoint DNS.
-5. Show the response comes from the workload service.
-
-## Security classification
-
-- **A: Segurança Básica**: Keep the NLB internal.
-- **B: Segurança Recomendada**: Use PrivateLink to publish the service privately.
-- **C: Segurança Opcional**: Extend later with TGW, inspection VPC, and firewall simulation.
