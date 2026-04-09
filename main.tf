@@ -207,6 +207,9 @@ resource "aws_vpc_endpoint" "partner_ssm" {
   tags = {
     Name = "${var.project_name}-partner-${each.value}"
   }
+    depends_on = [
+    aws_vpc_endpoint_service.workload
+  ]
 }
 
 resource "aws_iam_role" "ec2_ssm" {
@@ -415,6 +418,10 @@ resource "aws_vpc_endpoint_service" "workload" {
   tags = {
     Name = "${var.project_name}-endpoint-service"
   }
+    depends_on = [
+    aws_lb.internal_nlb,
+    aws_lb_listener.http
+  ]
 }
 
 resource "aws_security_group" "privatelink_consumer" {
